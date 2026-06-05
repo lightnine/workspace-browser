@@ -15,7 +15,7 @@ export function BackendGapPanel({ apiLog, selected }: Props) {
         <a href="https://docs.databricks.com/aws/en/workspace/workspace-browser" target="_blank" rel="noreferrer">
           Workspace browser
         </a>
-        。完整说明见 <code>docs/BACKEND_GAP.md</code>。
+        。差距项维护在 <code>src/data/backendGaps.ts</code>。
       </p>
       <table className="gap-table">
         <thead>
