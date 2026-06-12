@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { AppShell } from '../components/AppShell';
 import { CreateMenu } from '../components/CreateMenu';
 import { Modal } from '../components/Modal';
+import { ExplorerPanel } from '../components/ExplorerPanel';
 import { FileEditorTabs } from '../components/FileEditorTabs';
 import { FileTable, type RowAction } from '../components/FileTable';
 import { WorkspaceTree } from '../components/WorkspaceTree';
@@ -13,9 +14,10 @@ import { basename, joinPath } from '../utils/path';
 
 interface Props {
   ctx: WorkspaceContext;
+  onOpenGitEditor: (folderPath: string) => void;
 }
 
-export function BrowsePage({ ctx }: Props) {
+export function BrowsePage({ ctx, onOpenGitEditor }: Props) {
   const ws = useWorkspaceBrowser(ctx);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -28,6 +30,10 @@ export function BrowsePage({ ctx }: Props) {
   const [destInput, setDestInput] = useState('');
   const [showGap, setShowGap] = useState(false);
   const [globalSearchMsg, setGlobalSearchMsg] = useState<string | null>(null);
+  const [explorerOn, setExplorerOn] = useState(true);
+  const editorOpen = ws.tabs.length > 0;
+  const showExplorer =
+    !ws.isTrash && ws.treeView !== 'shared' && ws.treeView !== 'favorites' && (explorerOn || editorOpen);
 
   const run = async (fn: () => Promise<void>) => {
     setDialogError(null);
@@ -53,6 +59,10 @@ export function BrowsePage({ ctx }: Props) {
   const handleRowAction = (action: RowAction, entry: FileEntry) => {
     if (action === 'favorite') {
       ws.toggleFavorite(entry.path);
+      return;
+    }
+    if (action === 'git-editor') {
+      onOpenGitEditor(entry.path);
       return;
     }
     if (action === 'open') {
@@ -123,10 +133,42 @@ export function BrowsePage({ ctx }: Props) {
       <div className="dbx-workspace-page">
         <WorkspaceTree active={ws.treeView} onSelect={ws.selectTreeView} />
 
-        <main className="dbx-ws-main">
+        <main className={`dbx-ws-main ${editorOpen ? 'editor-mode' : ''}`}>
           {globalSearchMsg && <div className="banner info">{globalSearchMsg}</div>}
           {ws.error && <div className="banner err">{ws.error}</div>}
 
+          <div className={editorOpen ? 'dbx-editor-layout' : 'dbx-browse-layout'}>
+            {showExplorer && (
+              <ExplorerPanel
+                ctx={ctx}
+                currentPath={ws.currentPath}
+                activeFilePath={ws.activeTab}
+                visible={explorerOn}
+                onToggleVisible={setExplorerOn}
+                onSelectFolder={ws.openFolder}
+                onOpenEntry={(e) => void ws.openEntry(e)}
+                onAction={handleRowAction}
+                favorites={ws.favorites}
+                refreshSignal={ws.listVersion}
+                onRefresh={() => void ws.refresh()}
+              />
+            )}
+            <div className={editorOpen ? 'dbx-editor-main' : 'dbx-browse-main'}>
+          {editorOpen ? (
+                <FileEditorTabs
+                  ctx={ctx}
+                  tabs={ws.tabs}
+                  activeTab={ws.activeTab}
+                  onSelect={ws.setActiveTab}
+                  onClose={ws.closeTab}
+                  onChange={ws.updateTabContent}
+                  onNotebookCells={ws.updateNotebookCells}
+                  onNotebookKernel={ws.updateNotebookKernel}
+                  onSave={(p) => void run(() => ws.saveTab(p))}
+                  fullHeight
+                />
+          ) : (
+          <>
           <div className="dbx-ws-header">
             <nav className="dbx-breadcrumb" aria-label="Breadcrumb">
               {ws.breadcrumbTrail.map((crumb, i) => (
@@ -265,15 +307,10 @@ export function BrowsePage({ ctx }: Props) {
               />
             ) : null}
           </div>
-
-          <FileEditorTabs
-            tabs={ws.tabs}
-            activeTab={ws.activeTab}
-            onSelect={ws.setActiveTab}
-            onClose={ws.closeTab}
-            onChange={ws.updateTabContent}
-            onSave={(p) => void run(() => ws.saveTab(p))}
-          />
+          </>
+          )}
+            </div>
+          </div>
 
           <div className="gap-toggle-row">
             <button type="button" onClick={() => setShowGap((v) => !v)}>
@@ -320,7 +357,12 @@ export function BrowsePage({ ctx }: Props) {
           <>
             <label>
               Repository URL
-              <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+              <input
+                value={repoUrl}
+                placeholder="git@github.com:lightnine/mini.git"
+                onChange={(e) => setRepoUrl(e.target.value)}
+              />
+              <span className="muted">SSH 会自动转为 HTTPS；克隆需轮询完成（约数秒）</span>
             </label>
             <label>
               Branch

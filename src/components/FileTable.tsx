@@ -11,7 +11,8 @@ export type RowAction =
   | 'download'
   | 'restore'
   | 'permanent-delete'
-  | 'favorite';
+  | 'favorite'
+  | 'git-editor';
 
 interface Props {
   files: FileEntry[];
@@ -127,11 +128,19 @@ export function FileTable({
                 </button>
                 {isGit && (
                   <span className="git-branch-badge" title="Git branch">
-                    main
+                    {entry.git_branch || 'Git'}
                   </span>
                 )}
                 {isGit && (
-                  <button type="button" className="git-editor-link" title="Open in Git folder editor">
+                  <button
+                    type="button"
+                    className="git-editor-link"
+                    title="Open in Git folder editor"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAction('git-editor', entry);
+                    }}
+                  >
                     Git editor
                   </button>
                 )}
@@ -160,6 +169,17 @@ export function FileTable({
                       onClick={() => setOpenMenu(null)}
                     />
                     <menu className="overflow-menu">
+                      {view === 'workspace' && isGit && (
+                        <>
+                          <button type="button" onClick={() => { onAction('git-editor', entry); setOpenMenu(null); }}>
+                            Open in Git folder editor
+                          </button>
+                          <button type="button" onClick={() => { onAction('git-editor', entry); setOpenMenu(null); }}>
+                            Git…
+                          </button>
+                          <hr />
+                        </>
+                      )}
                       <button type="button" onClick={() => { onAction('open', entry); setOpenMenu(null); }}>
                         Open in new browser tab
                       </button>

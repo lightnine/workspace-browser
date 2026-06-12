@@ -39,8 +39,20 @@ export function entryIcon(entry: FileEntry): string {
   if (entry.is_dir) return 'folder';
   if (entry.name.endsWith('.py')) return 'python';
   if (entry.name.endsWith('.sql')) return 'sql';
+  if (entry.name.endsWith('.json')) return 'json';
   if (/\.(md|markdown)$/i.test(entry.name)) return 'markdown';
   return 'file';
+}
+
+/** Databricks-style relative last-edit label */
+export function formatLastEdit(iso?: string): string {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const days = Math.floor((Date.now() - then) / (1000 * 60 * 60 * 24));
+  if (days <= 0) return 'Last edit was today';
+  if (days === 1) return 'Last edit was yesterday';
+  return `Last edit was ${days} days ago`;
 }
 
 export function entryTypeLabel(entry: FileEntry): string {

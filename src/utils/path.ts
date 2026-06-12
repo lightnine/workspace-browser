@@ -15,3 +15,12 @@ export function dirname(path: string): string {
   const i = p.lastIndexOf('/');
   return i <= 0 ? '' : p.slice(0, i);
 }
+
+/** Remap a path when an ancestor (or itself) was renamed/moved. */
+export function remapPath(path: string, oldPrefix: string, newPrefix: string): string {
+  if (!oldPrefix) return path;
+  if (path === oldPrefix) return newPrefix;
+  const childPrefix = `${oldPrefix}/`;
+  if (path.startsWith(childPrefix)) return newPrefix + path.slice(oldPrefix.length);
+  return path;
+}

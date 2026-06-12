@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { decodeBase64Utf8, encodeBase64Utf8, encodeBase64Bytes, workspaceApi } from '../api/workspaceClient';
 import type { WorkspaceTreeView } from '../components/WorkspaceTree';
-import type { FileEntry, OpenTab, WorkspaceContext } from '../types';
+import type { FileEntry, NotebookTab, OpenTab, WorkspaceContext } from '../types';
 import { entryTypeLabel, type FileTypeFilter } from '../utils/format';
-import { joinPath } from '../utils/path';
+import { isNotebookEntry, parseNotebookJson, serializeNotebook } from '../utils/notebook';
+import { basename, dirname, joinPath, remapPath } from '../utils/path';
+import { GIT_FOLDER_STATUS, gitFolderStatusLabel, normalizeRepoUrl } from '../utils/gitUrl';
 
 const FAV_KEY = 'ws-browser-favorites';
 
@@ -38,49 +40,83 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [apiLog, setApiLog] = useState<string[]>([]);
   const [folderFavorite, setFolderFavorite] = useState(false);
+  const [listVersion, setListVersion] = useState(0);
 
   const logApi = (msg: string) =>
     setApiLog((prev) => [`${new Date().toLocaleTimeString()} ${msg}`, ...prev].slice(0, 20));
 
   const isTrash = treeView === 'trash';
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const ok = await workspaceApi.healthz();
-      setBackendOk(ok);
-      if (!ok) throw new Error('workspace-service 未启动（:8080）');
-
-      if (isTrash) {
-        logApi('ListRecycleBin');
-        const data = await workspaceApi.listRecycleBin(ctx);
-        setFiles(data.files || []);
-        setBreadcrumbs([]);
-      } else if (treeView === 'shared') {
-        setFiles([]);
-        setBreadcrumbs([]);
-      } else if (treeView === 'favorites') {
-        logApi('ListFiles (favorites aggregate)');
-        const data = await workspaceApi.listFiles(ctx, '');
-        const all = data.files || [];
-        setFiles(all.filter((f) => favorites.has(f.path)));
-        setBreadcrumbs([]);
-      } else {
-        logApi(`ListFiles path=${currentPath || '/'}`);
-        const [list, crumbs] = await Promise.all([
-          workspaceApi.listFiles(ctx, currentPath),
-          workspaceApi.getFolderNodePath(ctx, currentPath),
-        ]);
-        setFiles(list.files || []);
-        setBreadcrumbs(crumbs.nodes || []);
+  const remapPathsInState = useCallback((oldPath: string, newPath: string) => {
+    setCurrentPath((cp) => remapPath(cp, oldPath, newPath));
+    setTabs((prev) =>
+      prev.map((t) => {
+        const p = remapPath(t.path, oldPath, newPath);
+        if (p === t.path) return t;
+        return { ...t, path: p, name: p === newPath ? basename(newPath) : t.name };
+      }),
+    );
+    setActiveTab((at) => (at ? remapPath(at, oldPath, newPath) : at));
+    setFavorites((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const p of prev) {
+        const mapped = remapPath(p, oldPath, newPath);
+        if (mapped !== p) changed = true;
+        next.add(mapped);
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [ctx, currentPath, isTrash, treeView, favorites]);
+      if (changed) saveFavorites(next);
+      return changed ? next : prev;
+    });
+    setSelectedPaths((prev) => {
+      const next = new Set<string>();
+      for (const p of prev) next.add(remapPath(p, oldPath, newPath));
+      return next;
+    });
+  }, []);
+
+  const refresh = useCallback(
+    async (pathOverride?: string) => {
+      setLoading(true);
+      setError(null);
+      const listPath = pathOverride ?? currentPath;
+      try {
+        const ok = await workspaceApi.healthz();
+        setBackendOk(ok);
+        if (!ok) throw new Error('workspace-service 未启动（:8080）');
+
+        if (isTrash) {
+          logApi('ListRecycleBin');
+          const data = await workspaceApi.listRecycleBin(ctx);
+          setFiles(data.files || []);
+          setBreadcrumbs([]);
+        } else if (treeView === 'shared') {
+          setFiles([]);
+          setBreadcrumbs([]);
+        } else if (treeView === 'favorites') {
+          logApi('ListFiles (favorites aggregate)');
+          const data = await workspaceApi.listFiles(ctx, '');
+          const all = data.files || [];
+          setFiles(all.filter((f) => favorites.has(f.path)));
+          setBreadcrumbs([]);
+        } else {
+          logApi(`ListFiles path=${listPath || '/'}`);
+          const [list, crumbs] = await Promise.all([
+            workspaceApi.listFiles(ctx, listPath),
+            workspaceApi.getFolderNodePath(ctx, listPath),
+          ]);
+          setFiles(list.files || []);
+          setBreadcrumbs(crumbs.nodes || []);
+        }
+        setListVersion((v) => v + 1);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [ctx, currentPath, isTrash, treeView, favorites],
+  );
 
   useEffect(() => {
     void refresh();
@@ -159,21 +195,90 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
       setActiveTab(entry.path);
       return;
     }
-    const tab: OpenTab = { path: entry.path, name: entry.name, content: '', dirty: false, loading: true };
-    setTabs((prev) => [...prev, tab]);
+    const loading: OpenTab = {
+      kind: 'file',
+      path: entry.path,
+      name: entry.name,
+      content: '',
+      dirty: false,
+      loading: true,
+    };
+    setTabs((prev) => [...prev, loading]);
     setActiveTab(entry.path);
     try {
       logApi(`ReadFile ${entry.path}`);
       const data = await workspaceApi.readFile(ctx, entry.path);
       const text = decodeBase64Utf8(data.content_base64 || '');
       setTabs((prev) =>
-        prev.map((t) => (t.path === entry.path ? { ...t, content: text, loading: false } : t)),
+        prev.map((t) => (t.path === entry.path && t.kind === 'file' ? { ...t, content: text, loading: false } : t)),
       );
     } catch (e) {
       setTabs((prev) =>
         prev.map((t) =>
-          t.path === entry.path
+          t.path === entry.path && t.kind === 'file'
             ? { ...t, content: `# 无法打开\n\n${e instanceof Error ? e.message : String(e)}`, loading: false }
+            : t,
+        ),
+      );
+    }
+  };
+
+  const openNotebookTab = async (entry: FileEntry) => {
+    const existing = tabs.find((t) => t.path === entry.path);
+    if (existing) {
+      setActiveTab(entry.path);
+      return;
+    }
+    const loading: NotebookTab = {
+      kind: 'notebook',
+      path: entry.path,
+      name: entry.name,
+      fileId: entry.file_id,
+      modifyTime: entry.modify_time,
+      content: '',
+      cells: [],
+      notebookMeta: {},
+      nbformat: 4,
+      nbformat_minor: 5,
+      dirty: false,
+      loading: true,
+      kernel: { kernelName: 'python3', state: 'disconnected' },
+    };
+    setTabs((prev) => [...prev, loading]);
+    setActiveTab(entry.path);
+    try {
+      logApi(`ReadFile notebook ${entry.path}`);
+      const data = await workspaceApi.readFile(ctx, entry.path);
+      const text = decodeBase64Utf8(data.content_base64 || '');
+      const parsed = parseNotebookJson(text);
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.path === entry.path && t.kind === 'notebook'
+            ? {
+                ...t,
+                content: text,
+                cells: parsed.cells,
+                notebookMeta: parsed.metadata,
+                nbformat: parsed.nbformat,
+                nbformat_minor: parsed.nbformat_minor,
+                fileId: entry.file_id || data.file?.file_id,
+                modifyTime: entry.modify_time || data.file?.modify_time,
+                loading: false,
+                kernel: { ...t.kernel, kernelName: parsed.defaultKernel },
+              }
+            : t,
+        ),
+      );
+    } catch (e) {
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.path === entry.path && t.kind === 'notebook'
+            ? {
+                ...t,
+                cells: [{ id: 'cell-0', cell_type: 'code', source: '', execution_count: null, outputs: [] }],
+                loading: false,
+                kernel: { ...t.kernel, state: 'error', error: e instanceof Error ? e.message : String(e) },
+              }
             : t,
         ),
       );
@@ -185,19 +290,52 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
       openFolder(entry.path);
       return;
     }
-    if (!entry.is_dir) await openFileTab(entry);
+    if (!entry.is_dir) {
+      if (isNotebookEntry(entry)) await openNotebookTab(entry);
+      else await openFileTab(entry);
+    }
   };
 
   const saveTab = async (path: string) => {
     const tab = tabs.find((t) => t.path === path);
     if (!tab) return;
+    let payload: string;
+    if (tab.kind === 'notebook') {
+      payload = serializeNotebook({
+        cells: tab.cells,
+        metadata: tab.notebookMeta,
+        nbformat: tab.nbformat,
+        nbformat_minor: tab.nbformat_minor,
+        defaultKernel: tab.kernel.kernelName,
+      });
+    } else {
+      payload = tab.content;
+    }
     logApi(`WriteFile ${path}`);
-    await workspaceApi.writeFile(ctx, path, encodeBase64Utf8(tab.content), true);
-    setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, dirty: false } : t)));
+    await workspaceApi.writeFile(ctx, path, encodeBase64Utf8(payload), true);
+    setTabs((prev) =>
+      prev.map((t) => (t.path === path ? { ...t, content: payload, dirty: false } : t)),
+    );
   };
 
   const updateTabContent = (path: string, content: string) => {
-    setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, content, dirty: true } : t)));
+    setTabs((prev) =>
+      prev.map((t) => (t.path === path && t.kind === 'file' ? { ...t, content, dirty: true } : t)),
+    );
+  };
+
+  const updateNotebookCells = (path: string, cells: NotebookTab['cells']) => {
+    setTabs((prev) =>
+      prev.map((t) => (t.path === path && t.kind === 'notebook' ? { ...t, cells, dirty: true } : t)),
+    );
+  };
+
+  const updateNotebookKernel = (path: string, patch: Partial<NotebookTab['kernel']>) => {
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.path === path && t.kind === 'notebook' ? { ...t, kernel: { ...t.kernel, ...patch } } : t,
+      ),
+    );
   };
 
   const closeTab = (path: string) => {
@@ -233,15 +371,22 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
   };
 
   const rename = async (entry: FileEntry, newName: string) => {
-    logApi(`RenamePath ${entry.path} -> ${newName}`);
-    await workspaceApi.renamePath(ctx, entry.path, newName);
-    await refresh();
+    const oldPath = entry.path;
+    const newPath = joinPath(dirname(oldPath), newName);
+    const nextListPath = remapPath(currentPath, oldPath, newPath);
+    logApi(`RenamePath ${oldPath} -> ${newName}`);
+    await workspaceApi.renamePath(ctx, oldPath, newName);
+    remapPathsInState(oldPath, newPath);
+    await refresh(nextListPath);
   };
 
   const move = async (entry: FileEntry, destPath: string) => {
-    logApi(`MovePath ${entry.path} -> ${destPath}`);
-    await workspaceApi.movePath(ctx, entry.path, destPath);
-    await refresh();
+    const oldPath = entry.path;
+    const nextListPath = remapPath(currentPath, oldPath, destPath);
+    logApi(`MovePath ${oldPath} -> ${destPath}`);
+    await workspaceApi.movePath(ctx, oldPath, destPath);
+    remapPathsInState(oldPath, destPath);
+    await refresh(nextListPath);
   };
 
   const copy = async (entry: FileEntry, destPath: string) => {
@@ -282,9 +427,27 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
 
   const createGitFolder = async (name: string, repoUrl: string, branch: string) => {
     const path = joinPath(currentPath, name);
-    logApi(`CreateGitFolder ${path}`);
-    await workspaceApi.createGitFolder(ctx, path, repoUrl, branch);
-    await refresh();
+    const normalizedUrl = normalizeRepoUrl(repoUrl);
+    if (normalizedUrl !== repoUrl.trim()) {
+      logApi(`CreateGitFolder ${path} (SSH→HTTPS ${normalizedUrl})`);
+    } else {
+      logApi(`CreateGitFolder ${path}`);
+    }
+    await workspaceApi.createGitFolder(ctx, path, normalizedUrl, branch);
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const st = await workspaceApi.getGitFolderStatus(ctx, path);
+      if (st.status === GIT_FOLDER_STATUS.READY) {
+        logApi(`GetGitFolderStatus ${path} ready branch=${st.branch || branch}`);
+        await refresh();
+        return;
+      }
+      if (st.status === GIT_FOLDER_STATUS.FAILED) {
+        throw new Error(st.message || gitFolderStatusLabel(GIT_FOLDER_STATUS.FAILED));
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    throw new Error('Git clone timed out after 120s');
   };
 
   const createNotebook = async (name: string, kernelName = 'python3') => {
@@ -294,8 +457,18 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
     const v = await workspaceApi.validatePath(ctx, currentPath, fileName);
     if (v.exists) throw new Error('名称已存在');
     logApi(`CreateNotebook ${path}`);
-    await workspaceApi.createNotebook(ctx, path, kernelName);
+    const created = await workspaceApi.createNotebook(ctx, path, kernelName);
     await refresh();
+    const fullPath = created.path || path;
+    void openNotebookTab({
+      name: created.name || fileName,
+      path: fullPath,
+      is_dir: false,
+      size: created.size || 0,
+      modify_time: created.modify_time || '',
+      node_type: 'notebook',
+      file_id: created.file_id,
+    });
   };
 
   return {
@@ -328,10 +501,13 @@ export function useWorkspaceBrowser(ctx: WorkspaceContext) {
     activeTab,
     setActiveTab,
     apiLog,
+    listVersion,
     refresh,
     openEntry,
     saveTab,
     updateTabContent,
+    updateNotebookCells,
+    updateNotebookKernel,
     closeTab,
     createFolder,
     createFile,

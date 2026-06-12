@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { BrowsePage } from './pages/BrowsePage';
+import { GitFolderPage } from './pages/GitFolderPage';
 import type { WorkspaceContext } from './types';
 import './App.css';
 
@@ -23,6 +24,7 @@ export default function App() {
     return DEFAULT_CTX;
   });
   const [showCtx, setShowCtx] = useState(false);
+  const [gitFolderPath, setGitFolderPath] = useState<string | null>(null);
 
   const updateCtx = (patch: Partial<WorkspaceContext>) => {
     setCtx((prev) => {
@@ -34,7 +36,11 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <BrowsePage ctx={ctx} />
+      {gitFolderPath ? (
+        <GitFolderPage ctx={ctx} folderPath={gitFolderPath} onBack={() => setGitFolderPath(null)} />
+      ) : (
+        <BrowsePage ctx={ctx} onOpenGitEditor={setGitFolderPath} />
+      )}
       <button type="button" className="ctx-fab" onClick={() => setShowCtx((v) => !v)}>
         Context
       </button>
